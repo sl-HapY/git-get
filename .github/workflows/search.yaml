@@ -1,4 +1,4 @@
-name: search
+name: git-get-search
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - soundcloud
           - pornhub
       query:
-        description: 'Search Query'
+        description: 'Search Term'
         required: true
         type: string
 
@@ -23,68 +23,58 @@ permissions:
 jobs:
   search:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sanitize Query
-        id: sanitize
-        run: |
-          SAFE=$(echo "${{ github.event.inputs.query }}" | sed 's/[^a-zA-Z0-9ا-ی۰-۹ _-]/_/g' | sed 's/ /_/g' | sed 's/__*/_/g' | cut -c1-50)
-          echo "safe=$SAFE" >> $GITHUB_OUTPUT
-
       - name: Setup
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y python3-pip jq
-          pip3 install --quiet yt-dlp
+          sudo apt-get update -qq && sudo apt-get install -y python3-pip
+          pip3 install yt-dlp
 
       - name: Search
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          QUERY: ${{ inputs.query }}
         run: |
-          mkdir -p downloads/search
-          cd downloads/search
+          mkdir -p search
+          python3 -c '
+import subprocess, json, time, sys
+query = """'"${{ env.QUERY }}"'"""
+platform = """'"${{ env.PLATFORM }}"'"""
+ts = int(time.time())
+outfile = f"search/{platform}_{ts}.md"
 
-          case "${{ github.event.inputs.platform }}" in
-            "youtube")
-              yt-dlp --flat-playlist --dump-single-json "ytsearch30:${{ github.event.inputs.query }}" | jq -r '
-                "# YouTube Search: ${{ github.event.inputs.query }}\n",
-                "| # | Title | Duration | Channel | URL |",
-                "|---|-------|----------|---------|-----|",
-                (.[0:25] | .[] | "| \(.[\"index\"] // 0) | \(.[\"title\"] // \"N/A\") | \(.[\"duration_string\"] // \"-\") | \(.[\"uploader\"] // \"-\") | [Watch](https://youtube.com/watch?v=\(.[\"id\"])) |")
-              ' > "youtube_${{ steps.sanitize.outputs.safe }}.md"
-              ;;
-            "youtube_music")
-              yt-dlp --flat-playlist --dump-single-json "ytsearch30:${{ github.event.inputs.query }} official audio" | jq -r '
-                "# YouTube Music Search: ${{ github.event.inputs.query }}\n",
-                "| # | Title | Duration | Channel | URL |",
-                "|---|-------|----------|---------|-----|",
-                (.[0:25] | .[] | "| \(.[\"index\"] // 0) | \(.[\"title\"] // \"N/A\") | \(.[\"duration_string\"] // \"-\") | \(.[\"uploader\"] // \"-\") | [Listen](https://youtube.com/watch?v=\(.[\"id\"])) |")
-              ' > "music_${{ steps.sanitize.outputs.safe }}.md"
-              ;;
-            "soundcloud")
-              yt-dlp --flat-playlist --dump-single-json "soundcloudsearch15:${{ github.event.inputs.query }}" | jq -r '
-                "# SoundCloud Search: ${{ github.event.inputs.query }}\n",
-                "| # | Title | Duration | User | URL |",
-                "|---|-------|----------|------|-----|",
-                (.[0:20] | .[] | "| \(.[\"index\"] // 0) | \(.[\"title\"] // \"N/A\") | \(.[\"duration_string\"] // \"-\") | \(.[\"uploader\"] // \"-\") | [Link](\(.[\"url\"])) |")
-              ' > "soundcloud_${{ steps.sanitize.outputs.safe }}.md"
-              ;;
-            "pornhub")
-              yt-dlp --flat-playlist --dump-single-json "pornhubsearch:${{ github.event.inputs.query }}" 2>/dev/null | jq -r '
-                "# Pornhub Search: ${{ github.event.inputs.query }}\n",
-                "| # | Title | Duration | URL |",
-                "|---|-------|----------|-----|",
-                (.[0:20] | .[] | "| \(.[\"index\"] // 0) | \(.[\"title\"] // \"N/A\") | \(.[\"duration_string\"] // \"-\") | [Link](\(.[\"url\"])) |")
-              ' > "pornhub_${{ steps.sanitize.outputs.safe }}.md"
-              ;;
-          esac
+if platform == "youtube":
+    cmd = ["yt-dlp", "--flat-playlist", "-j", f"ytsearch50:{query}"]
+elif platform == "youtube_music":
+    cmd = ["yt-dlp", "--flat-playlist", "-j", f"ytsearch50:{query} music", "--extractor-args", "youtube:player_client=mweb"]
+elif platform == "soundcloud":
+    cmd = ["yt-dlp", "--flat-playlist", "-j", f"scsearch50:{query}"]
+elif platform == "pornhub":
+    cmd = ["yt-dlp", "--flat-playlist", "-j", f"pornhubsearch:{query}"]
 
+res = subprocess.run(cmd, capture_output=True, text=True)
+entries = [json.loads(l) for l in res.stdout.strip().split("\n") if l.strip()]
+
+with open(outfile, "w", encoding="utf-8") as f:
+    f.write(f"# Search Results - {platform.replace(\"_\", \" \").title()}\n\n")
+    f.write(f"**Query:** {query}\n\n")
+    f.write("| # | Title | Uploader | Duration | Link |\n")
+    f.write("|---|-------|----------|----------|------|\n")
+    for i, e in enumerate(entries, 1):
+        title = e.get("title", "N/A").replace("|", "\\|")
+        uploader = e.get("uploader", "N/A").replace("|", "\\|")
+        dur = e.get("duration_string") or str(e.get("duration", "N/A"))
+        link = e.get("webpage_url") or e.get("url", "")
+        f.write(f"| {i} | {title} | {uploader} | {dur} | [link]({link}) |\n")
+print(f"Search completed: {len(entries)} results")
+'
       - name: Commit & Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/search/
-          git commit -m "Search completed: ${{ github.event.inputs.platform }}" || echo "No changes"
+          git add search/
+          git commit -m "git-get: search" || echo "No changes"
           git push
